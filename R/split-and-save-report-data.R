@@ -1,0 +1,292 @@
+#' Split and save report data
+#'
+#' @description Split a base dataset according to specifications in a config file
+#'  and save it to a target directory
+#'
+#' @return A number of data sets are stored to disk. All these data sets are named
+#'  "tableData" for immediate use in the Shiny frontend.
+#'
+#' @import foreach
+#' @import data.table
+#'
+#' @examples
+#' \dontrun{
+#' sourceReportDir = file.path(getwd(), "modules/reports/")
+#' listOfAllReportTabs <- load_all_report_configs(sourceReportDir)
+#' listOfReports <- listOfAllReportTabs[[1]]
+#' config <- listOfReports$reports[[1]]
+#' baseData <- fetch_some_raw_data_from_sql_server() # Mock code
+#'
+#' split_and_save_report_data(config, baseData)
+#' }
+#' @export
+split_and_save_report_data <- function(config, baseData, verbose = TRUE) {
+
+  ## Aggregation ----
+
+  # Mission:
+  # Make a table that contains counts, means and sums for all relevant metrics according to the config list above.
+  #
+  # Workflow:
+  # 1. Find all columns to calculate in the dataset. This implies finding all the
+  #   permutations of specified functions and value columns and constructing a function
+  #   to be called to calculate that column.
+  # 2. Find filtering and grouping variables
+  # 3. Group data by all applicable grouping variables and construct columns using
+  #   the column definitions from (1). Do this for both parent-only variables and
+  #   parent-children variable pairs. Store data to disk.
+
+  ## 1. Find all columns to calculate in the dataset.
+
+  # All available functions
+  functionCalls <- sapply(config$metrics$singleColumn, function(metric) {
+    if (!is.null(metric$params)) {
+      params = paste0(", ", paste(names(metric$params), metric$params, sep = " = ", collapse = ", "))
+    } else {
+      params = NULL
+    }
+    functionCall = paste(metric$func, "(",
+                         "%s",
+                         paste(c(params), sep = ", ", collapse = ", "),
+                         ")", sep = "")
+    return(functionCall)
+  })
+
+
+  # All available value columns
+  singleColumns <- sapply(config$columns$singleColumn, function(column) { column$var })
+  sexes <- config$sex$singleColumn
+
+  columnDefinitions <- list()
+
+  # Construct column definitions from variable names and function calls
+  for (func in names(functionCalls)) {
+    for (column in names(singleColumns)) {
+
+      functionInvocation <- sprintf(functionCalls[[func]], singleColumns[[column]])
+
+      columnName <- sprintf("%s_%s", func, column)
+
+      columnDefinitions[[ columnName ]] <- functionInvocation
+    }
+  }
+
+
+
+  uniqueTimeValues <- get_unique_time_values(baseData, get_time_variables(config))
+
+  ## 3. Group data by all applicable grouping variables and construct columns
+
+  if (verbose) {
+    message("Creating single-column datasets...")
+  }
+  # Single-column datasets
+
+  create_single_column_files(functionCalls, singleColumns, sexes, config, baseData, verbose, columnDefinitions)
+
+
+  if (verbose) {
+    message("Finished creating single-column data sets.")
+    message("Creating multi-column datasets from single-column datasets...")
+  }
+  ## Multiple columns
+  menuGroups <- config[c('metrics', 'sex', 'columns')]
+
+  for (menuGroup in names(menuGroups)) {
+    groupConfig <- menuGroups[[ menuGroup ]]
+
+    # Error handling: Is there no multipleColumn definition for this menu group?
+    if (is.null(menuGroups[[ menuGroup ]]$multipleColumn))
+      next()
+
+    multipleColumnGroups <- names(groupConfig$multipleColumn)
+
+    columnNames <- switch(
+      menuGroup,
+      "columns" = multipleColumnGroups,
+      names(singleColumns)
+    )
+    metricNames <- switch(
+      menuGroup,
+      "metrics" = multipleColumnGroups,
+      names(functionCalls)
+    )
+    sexNames <- switch(
+      menuGroup,
+      "sex" = multipleColumnGroups,
+      names(sexes)
+    )
+
+    create_multi_column_files(config, metricNames, columnNames, sexNames, verbose, menuGroup, groupConfig, multipleColumnGroups, FALSE, uniqueTimeValues)
+
+
+  }
+
+  amountMultiColumns <- sum(!is.null(menuGroups[[ 'columns' ]]$multipleColumn),
+                            !is.null(menuGroups[[ 'metrics' ]]$multipleColumn),
+                            !is.null(menuGroups[[ 'sex' ]]$multipleColumn))
+
+  if (verbose) {
+    message("Finished creating multi-column data sets.")
+    message("Creating double and triple multi columns.")
+    message("Diferent Multi columns: ", amountMultiColumns)
+  }
+
+
+
+
+  if(amountMultiColumns > 1){
+
+    third <- c("metrics","sex")
+
+
+    create_double_multi_column_files(third, menuGroups, singleColumns, functionCalls, sexes, config, verbose, "metrics", menuGroups[["metrics"]], names(menuGroups[["metrics"]]$multipleColumn), uniqueTimeValues)
+
+
+  }
+
+  if (verbose) {
+    message("Finished creating double multi columns.")
+  }
+
+}
+
+
+
+
+#' Create multi column files
+#'
+#' @description Generates all possible combinations of multi column summaries of the baseData acording to the grouping and filtering parameters recieved.
+#' Files are generated by using ready made single column files.
+#'
+#' @return The corresponding data sets are stored to disk. The data set is named
+#'  "tableData" for immediate use in the Shiny frontend.
+#'
+create_multi_column_files <- function (config, metricNames, columnNames, sexNames, verbose, menuGroup, groupConfig, multipleColumnGroups, isDoubleMultiColumn, uniqueTimeValues) {
+  rowNames <- names(config$rows)
+
+  # foreach::foreach (sex =  sexNames, .packages = "dplyr") %dopar%  {
+  foreach::foreach (column =  columnNames, .packages = "dplyr") %dopar%  {
+    for (sex in  sexNames){
+      #     for  (column in columnNames){
+
+      for (metric in metricNames) {
+        for (row in rowNames) {
+          for(multipleColumnGroup in multipleColumnGroups){
+            filter_and_save_table_data_multicolumn(metric, column, sex, row, config, verbose, menuGroup, groupConfig, multipleColumnGroup,  "base", isDoubleMultiColumn, uniqueTimeValues)
+
+            filter_and_save_table_data_multicolumn(metric, column, sex, row, config, verbose, menuGroup, groupConfig, multipleColumnGroup,  "subtotal", isDoubleMultiColumn, uniqueTimeValues)
+
+            if (!is.null(config$rows[[ row ]]$child)) {
+              filter_and_save_table_data_multicolumn(metric, column, sex, row, config, verbose, menuGroup, groupConfig, multipleColumnGroup,  "child", isDoubleMultiColumn, uniqueTimeValues)
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+
+#' Create double multi column files
+#'
+#' @description Generates all possible combinations of double multi column summaries of the baseData acording to the grouping and filtering parameters recieved.
+#' Files are generated by using ready made multi column files.
+#'
+#' @return The corresponding data sets are stored to disk. The data set is named
+#'  "tableData" for immediate use in the Shiny frontend.
+create_double_multi_column_files <- function (actual, menuGroups, singleColumns, functionCalls, sexes, config, verbose, menuGroup, groupConfig, multipleColumnGroups, uniqueTimeValues) {
+
+  columnNames <- names(singleColumns)
+
+  if("metrics" %in% actual){
+    metricNames <- names(menuGroups[[ "metrics" ]]$multipleColumn)
+  }else{
+    metricNames <- names(functionCalls)
+  }
+
+  if("sex" %in% actual){
+    sexNames <- names(menuGroups[[ "sex" ]]$multipleColumn)
+  }else{
+    sexNames <- names(sexes)
+  }
+
+  for(multipleColumnGroup in multipleColumnGroups){
+    create_multi_column_files(config, metricNames[metricNames %in% multipleColumnGroup], columnNames, sexNames, verbose, menuGroup, groupConfig, multipleColumnGroup, TRUE, uniqueTimeValues)
+  }
+
+}
+
+
+#' Create single column files
+#'
+#' @description Generates all possible combinations of single column summaries of the baseData acording to the grouping and filtering parameters recieved.
+#'
+#' @return The corresponding data sets are stored to disk. The data set is named
+#'  "tableData" for immediate use in the Shiny frontend.
+
+create_single_column_files <- function (functionCalls, singleColumns, sexes, config, baseData, verbose, columnDefinitions) {
+  ## 2. Filtering and grouping variables
+
+  staticFilterGroups <- sapply(config$filters$static, function(static) { static$vars }) %>% c()
+  names(staticFilterGroups) <- NULL
+  baseData <- data.table(baseData)
+
+
+  #       for (column in names(singleColumns)) {
+
+  for (sex in names(sexes)) {
+    sexFilterDots <- paste0(config$sex$var, " %in% ", "c(", paste0("'", sexes[[ sex ]]$value, "'", collapse = ", "), ")")
+
+    filteredBySexData <- baseData[eval(parse(text = sexFilterDots)), ]
+
+
+    # Single columns
+    for (rowgroup in names(config$rows)) {
+
+
+      filteredCollapsibleFilters <- get_collapsible_filters_for_row(config, rowgroup)
+
+      collapsibleFilterGroups <- sapply(filteredCollapsibleFilters, function(static) { static$vars }) %>% c()
+      names(collapsibleFilterGroups) <- NULL
+
+      filterGroups <- unlist(c(collapsibleFilterGroups, staticFilterGroups))
+      setkeyv(filteredBySexData, c(config$rows[[ rowgroup ]]$parent, config$rows[[ rowgroup ]]$child, filterGroups))
+
+      foreach::foreach(column = names(singleColumns), .packages = c("dplyr", "data.table")) %dopar% {
+
+        for (metric in names(functionCalls)) {
+
+
+          ## With subgrouping (i.e. child rows)
+          if (!is.null(config$rows[[ rowgroup ]]$child)) {
+            # Where to store the data
+            rowGroupDots <- c(config$rows[[ rowgroup ]]$parent, config$rows[[ rowgroup ]]$child, filterGroups)
+
+            filter_and_save_table_data_single_column(metric, column, sex, rowgroup, config, verbose, filteredBySexData, rowGroupDots, columnDefinitions, sexFilterDots, "child")
+
+
+          }
+
+          rowGroupDots <- c(config$rows[[ rowgroup ]]$parent, filterGroups)
+
+          ## Without subgrouping
+          filter_and_save_table_data_single_column(metric, column, sex, rowgroup, config, verbose, filteredBySexData, rowGroupDots, columnDefinitions, sexFilterDots, "base")
+
+          filter_and_save_table_data_single_column(metric, column, sex, rowgroup, config, verbose, filteredBySexData, rowGroupDots[-1], columnDefinitions, sexFilterDots, "subtotal")
+
+        }
+      }
+
+    }
+
+    rm(filteredBySexData); gc()
+  }
+
+
+}
+
+
+
+
+

@@ -1,0 +1,28 @@
+Package: pmspPreload
+Type: Package
+Title: Munging Data for Statistics Presentation
+Version: 0.1
+Date: 2015-10-02
+Authors@R: c(
+  person("Love", "Hansson", email = "love.hansson@gmail.com", role = c("aut", "cre")),
+  person("Cedric", "Perriard", email = "c@perriard.se", role = c("aut")),
+  person("Leonel", "Szperling", email = "lszperling@gmail.com", role = c("aut")),
+  person("Swedish Pensions Agency", role = "cph")
+  )
+Description: Munging data for statistics presentation
+License: MIT
+LazyData: TRUE
+Depends:
+  R (>= 3.1.0),
+  dplyr,
+  stringr,
+  pmtools,
+  jsonlite,
+  RODBC,
+  devtools,
+  foreach,
+  digest,
+  data.table,
+  testthat
+Suggests: testthat
+Imports: data.table
